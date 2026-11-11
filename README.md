@@ -269,5 +269,5 @@ background processes, machine switching, offline and refused commands).
 
 ## License and credits
 
-MIT. Built with Claude (Anthropic) under the direction of Noé Guenego (noegng), who is responsible for this
-submission. Written for the Hermes Agent Plugin Hackathon.
+MIT. By Noé Guenego (noegng), who is responsible for this submission. Written for the Hermes Agent
+Plugin Hackathon.
