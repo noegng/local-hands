@@ -1,0 +1,23 @@
+name: local-hands
+version: 1.0.0
+manifest_version: 2
+description: >-
+  Remote brain, local hands. Hermes runs on your server; its terminal and file tools run on your own
+  computer through a zero-dependency daemon that dials out over pinned TLS and asks you before acting.
+author: Noé Guenego (noegng)
+license: MIT
+kind: backend
+requires_hermes: ">=0.22.5"
+tags: [terminal, backend, remote, laptop, split-runtime]
+provides_tools:
+  - hands
+provides_hooks:
+  - pre_llm_call
+config_schema:
+  port: {type: int, default: 7717, label: "Hub port", description: "TCP port the hands daemons connect to (TLS)."}
+  bind: {type: str, default: "0.0.0.0", label: "Bind address", description: "Interface the hub listens on, e.g. your Tailscale address."}
+  public_host: {type: str, default: "", label: "Public host", description: "Address of this host as your computers reach it; printed in invites. Empty = detect."}
+  brain_name: {type: str, default: "", label: "Brain name", description: "Name shown on paired machines. Empty = this host's hostname."}
+  default_machine: {type: str, default: "", label: "Default machine", description: "Machine commands run on by default. Empty = the first one online."}
+  brain_target: {type: bool, default: true, label: "Allow the 'brain' target", description: "Let the agent also run commands on this Hermes host when it switches to 'brain'."}
+  autostart_hub: {type: bool, default: true, label: "Start the hub automatically", description: "Start the background hub when a session first needs it."}
