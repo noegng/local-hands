@@ -299,7 +299,13 @@ class Pairing(unittest.TestCase):
     def test_token_file_on_the_machine_is_private(self):
         self.rig.join("mac")
         folder = os.path.join(self.rig.config_home("mac"), "local-hands")
-        files = [f for f in os.listdir(folder) if f.startswith("brain-")]
+        # the hub sees the machine online a moment before the daemon has written its token file
+        def brain_files():
+            try:
+                return [f for f in os.listdir(folder) if f.startswith("brain-") and not f.endswith(".tmp")]
+            except FileNotFoundError:
+                return []
+        files = wait_for(brain_files, 10)
         self.assertEqual(len(files), 1)
         self.assertEqual(os.stat(os.path.join(folder, files[0])).st_mode & 0o077, 0)
         self.assertEqual(os.stat(folder).st_mode & 0o077, 0)
