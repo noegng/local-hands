@@ -226,8 +226,10 @@ class HandsEnvironment(BaseEnvironment):
     def execute(self, command: str, cwd: str = "", **kwargs) -> dict:
         target = self._rt.chosen_target() or self._target
         with self._swap:
-            self._activate(target)
+            # Before _activate: a first visit runs init_session() on this thread, and its cwd
+            # must be filed under the machine being entered, not the one this thread used last.
             self._tl.target = target
+            self._activate(target)
             # Hermes passes each conversation's last recorded cwd (or terminal.cwd). Right after
             # a switch that path belongs to the previous machine, and terminal.cwd belongs to the
             # Hermes host: drop either unless this machine has reported that directory itself.

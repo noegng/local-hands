@@ -36,7 +36,18 @@ def load_plugin():
             self._snapshot_path = self._cwd_file = ""
 
         def init_session(self):
-            pass
+            self._update_cwd({"cwd": self.cwd})     # like Hermes: the bootstrap reports where it is
+
+        def _update_cwd(self, result):
+            self.cwd = result["cwd"]
+
+        def get_temp_dir(self):
+            return "/tmp"
+
+        def execute(self, command, cwd="", **kwargs):
+            if command.startswith("cd "):
+                self._update_cwd({"cwd": command[3:]})
+            return {"output": "", "returncode": 0, "cwd": cwd or self.cwd, "cwd_observed": True}
 
     stub("agent")
     stub("agent.terminal_env_provider", TerminalEnvironmentProvider=type("TerminalEnvironmentProvider", (), {}))
@@ -104,6 +115,26 @@ class HubIsNotStartedByReads(PluginCase):
             self.rt.settings["autostart_hub"] = True
             self.rt.status(autostart=True)                      # the backend
             self.assertEqual(spawn.call_count, 2)
+
+
+class EachTargetKeepsItsOwnDirectory(PluginCase):
+    def test_round_trip_on_one_thread(self):
+        """Hermes may run consecutive tool calls on the same thread. Entering a target for the
+        first time must not file that target's start directory under the one just left."""
+        machines = [{"name": "mac", "workspace": "/work", "online": True}]
+        env = self.provider.HandsEnvironment(self.rt, "mac", machines, 30, "task")
+        with mock.patch.object(self.rt, "machines", return_value=machines):
+            env.execute("cd /work/sub")
+            self.rt.use(self.lh_core.BRAIN)
+            env.execute("true", cwd="/work/sub")          # Hermes still passes the machine's cwd
+            self.assertEqual(env.cwd, os.path.expanduser("~"))
+            env.execute("cd /srv")
+            self.rt.use("mac")
+            env.execute("true", cwd="/srv")
+            self.assertEqual(env.cwd, "/work/sub")
+            self.rt.use(self.lh_core.BRAIN)
+            env.execute("true", cwd="/work/sub")
+            self.assertEqual(env.cwd, "/srv")
 
 
 class BrainCommandsDoNotInheritHermesEnvironment(PluginCase):
