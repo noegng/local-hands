@@ -20,4 +20,4 @@ config_schema:
   brain_name: {type: str, default: "", label: "Brain name", description: "Name shown on paired machines. Empty = this host's hostname."}
   default_machine: {type: str, default: "", label: "Default machine", description: "Machine commands run on by default. Empty = the first one online."}
   brain_target: {type: bool, default: true, label: "Allow the 'brain' target", description: "Let the agent also run commands on this Hermes host when it switches to 'brain'."}
-  autostart_hub: {type: bool, default: true, label: "Start the hub automatically", description: "Start the background hub when a session first needs it."}
+  autostart_hub: {type: bool, default: true, label: "Start the hub automatically", description: "Start the background hub when the hands backend runs its first command. Never started by the hands tool."}

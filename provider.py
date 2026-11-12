@@ -53,12 +53,17 @@ class Runtime:
     def ctl(self) -> Path:
         return lh_core.control_socket_path(self.data_dir)
 
-    def status(self, autostart: bool = False) -> Optional[dict]:
-        """Hub status, or None when the hub is not running (and was not started)."""
+    def status(self, autostart: bool = False, explicit: bool = False) -> Optional[dict]:
+        """Hub status, or None when the hub is not running (and was not started).
+
+        ``autostart`` is only passed by the paths that genuinely need a listening hub: the
+        ``hands`` backend creating an environment (unless ``autostart_hub`` is off), and
+        ``hermes hands up`` / ``pair``, which the user ran on purpose (``explicit``). Reading
+        the status (the ``hands`` tool, ``/hands status``, the prompt hook) never starts it."""
         try:
             return lh_core.rpc(self.ctl, {"op": "status"}, timeout=2.0)
         except lh_core.HubUnavailable:
-            if not (autostart and self.settings.get("autostart_hub", True)):
+            if not (autostart and (explicit or self.settings.get("autostart_hub", True))):
                 return None
         try:
             return lh_core.spawn_hub(self.data_dir, bind=str(self.settings.get("bind") or "0.0.0.0"),
@@ -111,6 +116,31 @@ class Runtime:
 RUNTIME = Runtime()
 
 
+# The only variables a brain command inherits when Hermes' own local backend cannot be used.
+_BASE_ENV = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TERM", "TMPDIR", "TZ")
+
+
+def minimal_env(environ: Optional[dict] = None) -> dict:
+    """An explicit allowlist: nothing Hermes was configured with (provider API keys, tokens)
+    reaches the child process."""
+    environ = os.environ if environ is None else environ
+    env = {k: v for k, v in environ.items() if k in _BASE_ENV or k.startswith("LC_")}
+    env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+    return env
+
+
+def _core_local_environment(timeout: int):
+    """Hermes' own local backend, which owns the rules for what a host command may inherit
+    (it strips provider credentials). None when it cannot be built."""
+    try:
+        from tools.environments.local import LocalEnvironment
+        return LocalEnvironment(cwd=os.path.expanduser("~"), timeout=timeout)
+    except Exception:
+        logger.warning("local-hands: Hermes' LocalEnvironment is unavailable; brain commands "
+                       "run with a minimal environment instead", exc_info=True)
+        return None
+
+
 class _ProbeEnvironment:
     """Answers Hermes' prompt-time ``uname`` probe from what the daemon reported when it
     connected, so building the system prompt never raises an approval prompt on the machine."""
@@ -148,6 +178,8 @@ class HandsEnvironment(BaseEnvironment):
         self._state: dict[str, dict] = {}       # per-target shell state while it is not the active one
         self._seen: dict[str, set] = {}         # cwds each target has actually reported
         self._swap = threading.RLock()
+        self._local: Any = None                 # Hermes' LocalEnvironment, built on first brain command
+        self._local_lock = threading.Lock()
         self._tl = threading.local()
         self._target = target
         self._init_target = target
@@ -250,8 +282,17 @@ class HandsEnvironment(BaseEnvironment):
         common = dict(stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                       encoding="utf-8", errors="replace")
         if target == lh_core.BRAIN:
+            # Never a bare Popen here: it would hand the whole Hermes environment (provider API
+            # keys included) to the command. Hermes' local backend spawns it with its own
+            # credential-stripped environment; failing that, an explicit allowlist does.
+            local = self._brain_local()
+            if local is not None:
+                proc = local._run_bash(cmd_string, login=login, timeout=timeout, stdin_data=stdin_data)
+                proc._lh_local = local
+                return proc
             argv = ["bash"] + (["-l"] if login else []) + ["-c", cmd_string]
-            proc = subprocess.Popen(argv, start_new_session=True, **common)
+            proc = subprocess.Popen(argv, start_new_session=True, env=minimal_env(), **common)
+            proc._lh_group = True
         else:
             read_fd, write_fd = os.pipe()
             argv = lh_core.exec_argv(self._rt.ctl, target, session=self._approval_session, label=self._task[:64],
@@ -267,11 +308,21 @@ class HandsEnvironment(BaseEnvironment):
             writer.start()
         return proc
 
+    def _brain_local(self):
+        with self._local_lock:
+            if self._local is None:
+                self._local = _core_local_environment(self.timeout) or False
+            return self._local or None
+
     def _kill_process(self, proc) -> None:
         # Brain commands run in their own process group; for a machine, killing the exec client
         # closes its socket and the hub tells the daemon to stop the remote process group.
+        local = getattr(proc, "_lh_local", None)
+        if local is not None:
+            local._kill_process(proc)
+            return
         try:
-            if getattr(proc, "args", [""])[0] == "bash":
+            if getattr(proc, "_lh_group", False):
                 os.killpg(proc.pid, 15)
                 time.sleep(0.2)
                 if proc.poll() is None:
@@ -281,10 +332,23 @@ class HandsEnvironment(BaseEnvironment):
         except (ProcessLookupError, PermissionError, OSError):
             pass
 
+    def _force_kill_process(self, proc) -> None:
+        local = getattr(proc, "_lh_local", None)
+        if local is not None:
+            local._force_kill_process(proc)
+        else:
+            self._kill_process(proc)
+
     def cleanup(self) -> None:
         with self._rt.lock:
             if self in self._rt.envs:
                 self._rt.envs.remove(self)
+        local, self._local = self._local, None
+        if local:
+            try:
+                local.cleanup()
+            except Exception:
+                logger.debug("local-hands: LocalEnvironment cleanup failed", exc_info=True)
 
 
 def _write_all(fd: int, data: bytes) -> None:
@@ -381,6 +445,8 @@ class HandsProvider(TerminalEnvironmentProvider):
                 if machine["name"] == target and machine.get("online"):
                     return _ProbeEnvironment(machine)
             raise EnvironmentConnectionError("no hands machine is connected")
+        # Hermes only calls this when terminal.backend is "hands": the one place, with
+        # `hermes hands up` and `pair`, where the hub is started.
         machines = RUNTIME.machines(autostart=True)
         target = RUNTIME.current_target(machines)
         by_name = {m["name"]: m for m in machines}

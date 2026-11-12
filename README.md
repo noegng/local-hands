@@ -120,7 +120,9 @@ backend. local-hands never bypasses or auto-answers them.
 ## Several machines
 
 Pair as many machines as you like (`hermes hands pair laptop`, `hermes hands pair workstation`). The
-reserved name `brain` is the Hermes host itself.
+reserved name `brain` is the Hermes host itself. Commands sent to `brain` are run by Hermes' own local
+backend (`LocalEnvironment`), so they get the same credential-stripped environment as with
+`terminal.backend: local`: provider API keys are not passed to them.
 
 The agent sees a `hands` tool: `hands(action="status")` lists the machines, `hands(action="use",
 machine="workstation")` moves its terminal and file tools there. Each machine keeps its own working
@@ -169,7 +171,7 @@ Ctrl-C stops the daemon and every command it started.
 | `brain_name` | hostname | Name shown on paired machines. |
 | `default_machine` | first online | Machine used until the agent picks another. |
 | `brain_target` | `true` | Allow the agent to switch to the Hermes host itself. |
-| `autostart_hub` | `true` | Start the hub when a session first needs it. |
+| `autostart_hub` | `true` | Start the hub when the `hands` backend runs its first command. `hermes hands up` and `pair` always can. |
 
 ## What this plugin does to your systems (disclosure)
 
@@ -179,6 +181,12 @@ Read this before installing. It is the complete list.
 
 - Starts a **long-running detached process** (the hub) that **listens on a TCP port** (default 7717, all
   interfaces unless you set `bind`). It outlives the Hermes process; stop it with `hermes hands down`.
+  It is started only by `hermes hands up`, by `hermes hands pair` / `/hands pair`, or by the first
+  command of a session whose `terminal.backend` is `hands`. Installing or enabling the plugin, and the
+  model calling the `hands` tool, never start it: they report "hub not running".
+- With `brain_target` on (the default), the model can switch its terminal to the **Hermes host
+  itself**. Those commands go through Hermes' local backend, with its environment filtering and with
+  Hermes' dangerous-command approvals.
 - Serves one file over HTTPS on that port, to anyone who can reach it: `hands.py`, the daemon's source
   (it contains no secret). This is how a new machine gets the daemon from the host it is about to trust.
   It is not an auto-update: a running daemon never fetches or replaces code.

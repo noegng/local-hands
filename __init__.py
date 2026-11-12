@@ -76,13 +76,22 @@ def _use(name: str, machines: list) -> tuple[bool, str]:
     return True, f"terminal and file tools now run on {name}"
 
 
+HUB_DOWN = ("hub not running: no machine can be reached. It starts when terminal.backend is 'hands' and a "
+            "command runs, or when the user runs `hermes hands up` or `hermes hands pair`.")
+
+
 def _tool_hands(args: dict, **kwargs) -> str:
+    """Reads the hub's state; never starts the hub (a model call must not open a listening port)."""
     try:
-        machines = RUNTIME.machines(autostart=True)
+        status = RUNTIME.status()
+        machines = list(status.get("machines", [])) if status else []
+        hub = {"hub": "running"} if status else {"hub": "not running", "note": HUB_DOWN}
         if args.get("action") == "use":
             ok, message = _use(str(args.get("machine") or ""), machines)
-            return json.dumps({"ok": ok, "message": message, **_overview(machines)})
-        return json.dumps({"ok": True, **_overview(machines)})
+            if not ok and status is None:
+                message += ". " + HUB_DOWN
+            return json.dumps({"ok": ok, "message": message, **hub, **_overview(machines)})
+        return json.dumps({"ok": True, **hub, **_overview(machines)})
     except Exception as exc:  # a tool handler must never raise
         return json.dumps({"ok": False, "error": str(exc)})
 
@@ -191,7 +200,7 @@ def render_status() -> str:
 
 
 def render_pair(name: str = "", host: str = "") -> str:
-    status = RUNTIME.status(autostart=True)
+    status = RUNTIME.status(autostart=True, explicit=True)
     if status is None:
         return "Could not start the Local Hands hub (see plugin-data/local-hands/hub.log)."
     reply = lh_core.rpc(RUNTIME.ctl, {"op": "invite", "name": name})
@@ -264,7 +273,9 @@ def _slash(raw_args: str = "", **kwargs) -> str:
     if sub == "status":
         return render_status()
     if sub == "use" and len(parts) > 1:
-        return _use(parts[1], RUNTIME.machines(autostart=True))[1]
+        status = RUNTIME.status()
+        message = _use(parts[1], status["machines"] if status else [])[1]
+        return message if status else message + "\n" + render_status()
     if sub == "pair":
         return render_pair(parts[1] if len(parts) > 1 else "")
     if sub == "log":
@@ -303,7 +314,7 @@ def _cli(args) -> None:
     elif cmd == "status":
         print(render_status())
     elif cmd == "up":
-        status = RUNTIME.status(autostart=True)
+        status = RUNTIME.status(autostart=True, explicit=True)
         print(f"Local Hands hub is running on port {status['port']}." if status else "The hub did not start (hub.log).")
     elif cmd == "down":
         try:
