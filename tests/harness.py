@@ -204,6 +204,14 @@ class PtyDaemon:
     def type(self, text):
         os.write(self.master, text.encode())
 
+    def answer(self, text):
+        """Type an answer once the daemon is actually reading it. The daemon discards whatever
+        was typed before the question was fully shown (it flushes the terminal's input, then
+        prints the choices ending in "›"), so typing as soon as the first line of the question
+        appears can lose the answer on a slow machine."""
+        self.expect("\u203a")
+        self.type(text)
+
     def close(self):
         try:
             os.close(self.master)

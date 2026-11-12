@@ -31,14 +31,14 @@ class Approval(unittest.TestCase):
         proc = self.rig.popen("echo one", session="alpha", display="echo one")
         tty.expect('brain "test-brain" wants to run commands here')
         tty.expect("first command: echo one")
-        tty.type("y\n")
+        tty.answer("y\n")
         self.assertEqual(proc.communicate(timeout=10)[0], b"one\n")
         # same session: no question
         self.assertEqual(self.rig.run("echo two", session="alpha", timeout=10), (0, b"two\n"))
         # another session: asked again
         proc = self.rig.popen("echo three", session="beta", display="echo three")
         tty.expect("wants to run commands here")
-        tty.type("y\n")
+        tty.answer("y\n")
         self.assertEqual(proc.communicate(timeout=10)[0], b"three\n")
 
     def test_no_refuses_with_126_and_tells_the_model_not_to_retry(self):
@@ -46,7 +46,7 @@ class Approval(unittest.TestCase):
         marker = self.rig.tmp / "must-not-exist"
         proc = self.rig.popen("touch %s" % marker, session="alpha", display="touch it")
         tty.expect("wants to run commands here")
-        tty.type("n\n")
+        tty.answer("n\n")
         out, _ = proc.communicate(timeout=10)
         self.assertEqual(proc.returncode, lh_core.EXIT_REFUSED)
         self.assertIn(b"[local-hands] the user refused this on their machine 'mac'", out)
@@ -63,7 +63,7 @@ class Approval(unittest.TestCase):
         tty = self.daemon(approve="session")
         proc = self.rig.popen("echo one", session="alpha")
         tty.expect("wants to run commands here")
-        tty.type("a\n")
+        tty.answer("a\n")
         self.assertEqual(proc.communicate(timeout=10)[0], b"one\n")
         self.assertEqual(self.rig.run("echo two", session="other", timeout=10), (0, b"two\n"))
         self.assertEqual(self.rig.machine("mac")["approve"], "auto")
@@ -72,12 +72,12 @@ class Approval(unittest.TestCase):
         tty = self.daemon(approve="session")
         proc = self.rig.popen("echo one", session="alpha")
         tty.expect("wants to run commands here")
-        tty.type("maybe\n")
+        tty.answer("maybe\n")
         tty.expect("answer with one of the letters shown")
         self.assertIsNone(proc.poll())
-        tty.type("\n")
+        tty.answer("\n")
         tty.expect("answer with one of the letters shown")
-        tty.type("Y\n")
+        tty.answer("Y\n")
         self.assertEqual(proc.communicate(timeout=10)[0], b"one\n")
 
     def test_keys_typed_before_the_question_do_not_answer_it(self):
@@ -88,7 +88,7 @@ class Approval(unittest.TestCase):
         tty.expect("wants to run commands here")
         time.sleep(0.6)
         self.assertIsNone(proc.poll(), "typeahead approved a command")
-        tty.type("n\n")
+        tty.answer("n\n")
         proc.communicate(timeout=10)
         self.assertEqual(proc.returncode, lh_core.EXIT_REFUSED)
 
@@ -112,7 +112,7 @@ class Approval(unittest.TestCase):
         # the next request gets a fresh prompt, and a late answer never runs the old command
         proc = self.rig.popen("echo next", session="alpha")
         tty.expect("wants to run commands here")
-        tty.type("y\n")
+        tty.answer("y\n")
         self.assertEqual(proc.communicate(timeout=10)[0], b"next\n")
         self.assertFalse(marker.exists())
 
@@ -122,9 +122,9 @@ class Approval(unittest.TestCase):
         second = self.rig.popen("echo b", session="beta")
         tty.expect("wants to run commands here")
         self.assertNotIn("wants to run commands here", tty.read(0.5))
-        tty.type("y\n")
+        tty.answer("y\n")
         tty.expect("wants to run commands here")
-        tty.type("n\n")
+        tty.answer("n\n")
         codes = sorted((first.wait(10), second.wait(10)))
         self.assertEqual(codes, [0, lh_core.EXIT_REFUSED])
         first.stdout.close()
@@ -137,13 +137,13 @@ class Approval(unittest.TestCase):
         proc = self.rig.popen("echo hidden-part\necho shown", session="alpha", display="echo shown")
         tty.expect("? echo shown")
         tty.expect("[v] view script")
-        tty.type("v\n")
+        tty.answer("v\n")
         tty.expect("| echo hidden-part")
-        tty.type("y\n")
+        tty.answer("y\n")
         self.assertEqual(proc.communicate(timeout=10)[0], b"hidden-part\nshown\n")
         proc = self.rig.popen("echo again", session="alpha", display="echo again")
         tty.expect("? echo again")
-        tty.type("s\n")
+        tty.answer("s\n")
         self.assertEqual(proc.communicate(timeout=10)[0], b"again\n")
         self.assertEqual(self.rig.run("echo free", session="alpha", timeout=10), (0, b"free\n"))
 
@@ -152,7 +152,7 @@ class Approval(unittest.TestCase):
         proc = self.rig.popen("echo x", session="alpha", display="ls\x1b[2K\x1b[1A\rharmless")
         tty.expect("[y] run")
         self.assertNotIn("\x1b[2K", tty.seen + tty.read(0.2))
-        tty.type("n\n")
+        tty.answer("n\n")
         proc.communicate(timeout=10)
 
     # ---- no terminal --------------------------------------------------------------------
