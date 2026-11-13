@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,6 +24,21 @@ if str(ROOT) not in sys.path:
 import lh_core  # noqa: E402
 
 HANDS = str(ROOT / "hands.py")
+
+
+def _unix_sockets_refused():
+    """Some sandboxes forbid Unix sockets, which Hermes and the hub talk through. The tests that
+    need a hub are then skipped with this reason instead of failing one by one."""
+    try:
+        socket.socket(socket.AF_UNIX, socket.SOCK_STREAM).close()
+        return ""
+    except OSError as exc:
+        return ("this environment refuses Unix sockets (%s): the hub cannot run here, so this test "
+                "is skipped, not passed" % (exc.strerror or exc))
+
+
+NO_UNIX_SOCKETS = _unix_sockets_refused()
+needs_unix_sockets = unittest.skipIf(bool(NO_UNIX_SOCKETS), NO_UNIX_SOCKETS)
 
 
 def free_port():
@@ -45,6 +61,8 @@ class Rig:
     """One hub plus any number of daemons. Use as a context manager."""
 
     def __init__(self):
+        if NO_UNIX_SOCKETS:
+            raise unittest.SkipTest(NO_UNIX_SOCKETS)
         self.tmp = Path(tempfile.mkdtemp(prefix="lh-"))
         self.data = self.tmp / "data"
         self.port = free_port()

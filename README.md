@@ -269,11 +269,13 @@ token. `hermes hands revoke` ends it.
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests        # or: pytest tests
+python3 -m unittest discover -s tests        # or: pytest
 ```
 
-78 tests, standard library only: a real hub and real daemons over TLS on 127.0.0.1, approval prompts
-driven through a pseudo-terminal. CI runs them on Ubuntu and macOS, Python 3.8 to 3.13.
+93 tests, standard library only: a real hub and real daemons over TLS on 127.0.0.1, approval prompts
+driven through a pseudo-terminal. CI runs them on Ubuntu and macOS, Python 3.8 to 3.13, and once more
+under pytest. In an environment that forbids Unix sockets the tests that need a hub are reported as
+skipped, with that reason, rather than as passed or failed.
 
 Verified against Hermes Agent 0.22.5 on macOS: `hermes plugins validate`, `hermes plugins doctor --ci`,
 and real agent turns through the `hands` backend (terminal, file tools, `execute_code`, timeouts,

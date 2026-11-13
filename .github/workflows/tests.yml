@@ -28,3 +28,6 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Run the test suite (standard library only, nothing to install)
         run: python -B -W ignore -m unittest discover -s tests -v
+      - name: Same suite under pytest (one job is enough)
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.13'
+        run: python -m pip install --quiet pytest && python -B -m pytest -q -p no:cacheprovider

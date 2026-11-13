@@ -15,6 +15,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from harness import needs_unix_sockets
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.dont_write_bytecode = True
 PKG = "lh_plugin_under_test"
@@ -81,6 +83,7 @@ class HubIsNotStartedByReads(PluginCase):
     def spawn_guard(self):
         return mock.patch.object(self.lh_core, "spawn_hub", side_effect=AssertionError("hub was started"))
 
+    @needs_unix_sockets
     def test_hands_tool_reports_hub_not_running_and_starts_nothing(self):
         with self.spawn_guard():
             status = json.loads(self.plugin._tool_hands({"action": "status"}))
@@ -92,6 +95,7 @@ class HubIsNotStartedByReads(PluginCase):
         self.assertIn("hub not running", use["message"])
         self.assertEqual(os.listdir(self.tmp.name), [])
 
+    @needs_unix_sockets
     def test_slash_status_use_hook_and_doctor_start_nothing(self):
         with self.spawn_guard():
             self.assertIn("not running", self.plugin._slash("status"))
@@ -125,6 +129,7 @@ class HubIsNotStartedByReads(PluginCase):
         self.assertIn("settings.bind", self.plugin._up_text({"port": 7717, "bind": "0.0.0.0"}))
         self.assertIn("on 100.64.0.1 only", self.plugin._up_text({"port": 7717, "bind": "100.64.0.1"}))
 
+    @needs_unix_sockets
     def test_only_explicit_paths_ask_for_a_start(self):
         with mock.patch.object(self.lh_core, "spawn_hub", return_value=None) as spawn:
             self.rt.status()

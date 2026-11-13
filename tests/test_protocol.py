@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness import HANDS, ROOT, lh_core
+from harness import HANDS, ROOT, lh_core, needs_unix_sockets
 
 spec = importlib.util.spec_from_file_location("lh_hands_daemon", HANDS)
 hands = importlib.util.module_from_spec(spec)
@@ -123,6 +123,7 @@ class FramingTests(unittest.TestCase):
         frame = {"t": "exec", "id": "é", "script": "echo 'x'\n"}
         self.assertEqual(lh_core.encode_frame(frame), hands.encode_frame(frame))
 
+    @needs_unix_sockets
     def test_round_trip_over_a_socket(self):
         a, b = socket.socketpair()
         try:
@@ -136,6 +137,7 @@ class FramingTests(unittest.TestCase):
             a.close()
             b.close()
 
+    @needs_unix_sockets
     def test_oversized_frames_are_refused(self):
         a, b = socket.socketpair()
         try:
@@ -151,6 +153,7 @@ class FramingTests(unittest.TestCase):
             a.close()
             b.close()
 
+    @needs_unix_sockets
     def test_non_object_frame_is_refused(self):
         a, b = socket.socketpair()
         try:
