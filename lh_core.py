@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 PROTO = 1
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 MAGIC = b"LH1\n"
 DEFAULT_PORT = 7717
 MAX_FRAME = 8 * 1024 * 1024
@@ -53,6 +53,7 @@ CHUNK = 64 * 1024
 # returns when the connection fails.
 EXIT_REFUSED = 126
 EXIT_LINK = 255
+EXIT_BLOCKED = 77      # the hub process: the OS refused its Unix control socket
 
 BRAIN = "brain"  # reserved machine name: the host Hermes itself runs on
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
@@ -519,10 +520,14 @@ class Hub:
             if _hub_alive(ctl_path):
                 raise SystemExit("local-hands hub is already running for this Hermes home")
             ctl_path.unlink()
-        self._ctl_server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         old_umask = os.umask(0o177)
         try:
+            self._ctl_server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self._ctl_server.bind(str(ctl_path))
+        except OSError as exc:
+            if exc.errno in (errno.EPERM, errno.EACCES):
+                raise HubBlocked(blocked_message(ctl_path, exc)) from exc
+            raise
         finally:
             os.umask(old_umask)
         self._ctl_server.listen(64)
@@ -962,13 +967,29 @@ class HubUnavailable(OSError):
     """The hub is not running (or its socket is unusable)."""
 
 
+class HubBlocked(HubUnavailable):
+    """The operating system refused the Unix control socket itself. Starting the hub would not
+    help, so this is reported as what it is instead of as "the hub is not running"."""
+
+
+def blocked_message(ctl_path: Path, exc: OSError) -> str:
+    return (f"this environment refuses the Unix socket Hermes and its hub talk through "
+            f"({ctl_path}: {exc.strerror or exc}). A sandbox, container or seccomp policy that forbids "
+            f"Unix sockets causes this, as does a socket owned by another user. Local Hands cannot "
+            f"reach any machine from here; run Hermes where Unix sockets are allowed")
+
+
 def _connect_control(ctl_path: Path, timeout: Optional[float]):
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.settimeout(timeout)
+    sock = None
     try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
         sock.connect(str(ctl_path))
     except OSError as exc:
-        sock.close()
+        if sock is not None:
+            sock.close()
+        if exc.errno in (errno.EPERM, errno.EACCES):
+            raise HubBlocked(blocked_message(ctl_path, exc)) from exc
         raise HubUnavailable(str(exc)) from exc
     return sock
 
@@ -1018,6 +1039,8 @@ def spawn_hub(data_dir: Path, *, bind: str, port: int, brain_name: str = "", wai
             if proc.poll() is not None:
                 break
             time.sleep(0.1)
+    if proc.poll() == EXIT_BLOCKED:
+        raise HubBlocked(blocked_message(ctl_path, PermissionError(errno.EPERM, "the hub could not create it")))
     tail = ""
     try:
         tail = (data_dir / "hub.log").read_text(encoding="utf-8", errors="replace").strip().splitlines()[-1]
@@ -1064,6 +1087,9 @@ def run_exec_client(args) -> int:
         return 2
     try:
         sock = _connect_control(Path(args.sock), None)
+    except HubBlocked as exc:
+        say(f"{exc}. Nothing ran.")
+        return EXIT_LINK
     except HubUnavailable:
         say("the local-hands hub is not running on the Hermes host. Start it with: hermes hands up")
         return EXIT_LINK
@@ -1148,6 +1174,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         signal.signal(signum, lambda *_: hub_obj.stop.set())
     try:
         hub_obj.serve()
+    except HubBlocked as exc:
+        log.error("%s", exc)
+        return EXIT_BLOCKED
     except OSError as exc:
         if exc.errno == errno.EADDRINUSE:
             log.error("port %d is already in use: pick another with `hermes config set "

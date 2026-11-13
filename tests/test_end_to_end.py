@@ -424,6 +424,18 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(code, lh_core.EXIT_LINK)
         self.assertIn(b"hub is not running", out)
 
+    def test_exec_client_names_a_forbidden_socket(self):
+        """The control socket exists but the OS refuses it (here: no permission on its folder)."""
+        if os.geteuid() == 0:
+            self.skipTest("root is never refused")
+        os.chmod(self.rig.ctl.parent, 0)
+        self.addCleanup(os.chmod, self.rig.ctl.parent, 0o700)
+        code, out = self.rig.run("echo x")
+        self.assertEqual(code, lh_core.EXIT_LINK)
+        self.assertIn(b"refuses the Unix socket", out)
+        self.assertIn(b"Nothing ran", out)
+        self.assertNotIn(b"hub is not running", out)
+
 
 def _pgrep(marker):
     pattern = "[%s]%s" % (marker[0], marker[1:])

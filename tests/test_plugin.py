@@ -71,10 +71,10 @@ class PluginCase(unittest.TestCase):
         self.rt = self.provider.RUNTIME
         self.tmp = tempfile.TemporaryDirectory(prefix="lh-")
         self.addCleanup(self.tmp.cleanup)
-        saved = (self.rt.data_dir, dict(self.rt.settings), self.rt.target)
+        saved = (self.rt.data_dir, dict(self.rt.settings), dict(self.rt.targets))
         self.addCleanup(lambda: (setattr(self.rt, "data_dir", saved[0]), setattr(self.rt, "settings", saved[1]),
-                                 setattr(self.rt, "target", saved[2])))
-        self.rt.data_dir, self.rt.settings, self.rt.target = Path(self.tmp.name), dict(self.plugin.SETTINGS), None
+                                 setattr(self.rt, "targets", saved[2])))
+        self.rt.data_dir, self.rt.settings, self.rt.targets = Path(self.tmp.name), dict(self.plugin.SETTINGS), {}
 
 
 class HubIsNotStartedByReads(PluginCase):
@@ -102,6 +102,28 @@ class HubIsNotStartedByReads(PluginCase):
                 self.plugin._pre_llm_call(session_id="s")
             self.provider.HandsProvider().probe()
             self.provider.HandsProvider().doctor_checks()
+
+    def test_a_forbidden_unix_socket_is_named_instead_of_a_bare_errno(self):
+        """A sandbox that refuses AF_UNIX: say so, everywhere, and do not try to start a hub."""
+        denied = mock.patch.object(self.lh_core.socket, "socket", side_effect=PermissionError(1, "Operation not permitted"))
+        with denied, self.spawn_guard():
+            self.assertIsNone(self.rt.status(autostart=True, explicit=True))
+            status = json.loads(self.plugin._tool_hands({"action": "status"}))
+            use = json.loads(self.plugin._tool_hands({"action": "use", "machine": "laptop"}))
+            shown = self.plugin._slash("status")
+            doctor = self.plugin._slash("doctor")
+            up = self.plugin._up_text(self.rt.status(autostart=True, explicit=True))
+        self.assertTrue(status["ok"])
+        self.assertEqual(status["hub"], "unreachable")
+        for text in (status["note"], use["message"], shown, doctor, up):
+            self.assertIn("refuses the Unix socket", text)
+            self.assertIn("Operation not permitted", text)
+        self.assertNotIn("not running", status["note"])
+
+    def test_up_says_which_interfaces_listen(self):
+        self.assertIn("every network interface", self.plugin._up_text({"port": 7717, "bind": "0.0.0.0"}))
+        self.assertIn("settings.bind", self.plugin._up_text({"port": 7717, "bind": "0.0.0.0"}))
+        self.assertIn("on 100.64.0.1 only", self.plugin._up_text({"port": 7717, "bind": "100.64.0.1"}))
 
     def test_only_explicit_paths_ask_for_a_start(self):
         with mock.patch.object(self.lh_core, "spawn_hub", return_value=None) as spawn:
@@ -197,6 +219,72 @@ class BrainCommandsDoNotInheritHermesEnvironment(PluginCase):
         self.assertEqual(calls, [("init", os.path.expanduser("~"), 30), ("run", "echo hi", True, 7, "x"),
                                  ("run", "echo again", False, 120, None), ("kill", proc), ("force", proc),
                                  ("cleanup",)])
+
+
+class EachConversationChoosesItsOwnMachine(PluginCase):
+    """Two chats of one gateway: a switch made in one must not move the other's commands."""
+
+    MACHINES = [{"name": "laptop", "online": True, "workspace": "/w/laptop"},
+                {"name": "desk", "online": True, "workspace": "/w/desk"}]
+
+    def setUp(self):
+        super().setUp()
+        self.chat = ""
+        for target, attr in ((self.provider, "scope_key"), (self.plugin, "scope_key")):
+            patcher = mock.patch.object(target, attr, side_effect=lambda: self.chat)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(self.rt, "status", return_value={"machines": self.MACHINES, "port": 1, "brain": "b"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def tool(self, chat, **args):
+        self.chat = chat
+        return json.loads(self.plugin._tool_hands(args))
+
+    def test_tool_switch_stays_in_its_chat(self):
+        self.assertTrue(self.tool("chat-a", action="use", machine="desk")["ok"])
+        self.assertEqual(self.tool("chat-a", action="status")["active"], "desk")
+        self.assertEqual(self.tool("chat-b", action="status")["active"], "laptop")
+        self.assertTrue(self.tool("chat-b", action="use", machine="brain")["ok"])
+        self.assertEqual(self.tool("chat-a", action="status")["active"], "desk")
+        self.assertEqual(self.tool("", action="status")["active"], "laptop")
+
+    def test_hook_tells_each_chat_its_own_machine(self):
+        self.tool("chat-a", action="use", machine="desk")
+        with mock.patch.object(self.plugin, "_backend_is_hands", return_value=True):
+            self.chat = "chat-a"
+            self.assertIn("desk", self.plugin._pre_llm_call(session_id="sa")["context"].split("Other targets")[0])
+            self.chat = "chat-b"
+            self.assertIn("laptop", self.plugin._pre_llm_call(session_id="sb")["context"].split("Other targets")[0])
+
+    def test_slash_command_names_the_chat_like_tools_do(self):
+        self.chat = ""    # a surface where only the keyword carries the chat
+        self.plugin._slash("use desk", platform="telegram", session_key="chat-a", session_id="sid")
+        self.assertEqual(self.tool("chat-a", action="status")["active"], "desk")
+        self.assertEqual(self.tool("chat-b", action="status")["active"], "laptop")
+        self.chat = ""    # the CLI passes its session id as session_key; its tools run with no key
+        self.plugin._slash("use desk", platform="cli", session_key="cli-session-id", session_id="cli-session-id")
+        self.assertEqual(self.tool("", action="status")["active"], "desk")
+        self.assertIn("desk", [line for line in self.plugin._slash("status", platform="cli").splitlines() if "active" in line][0])
+
+    def test_environment_follows_its_own_chat_only(self):
+        env = self.provider.HandsEnvironment(self.rt, "laptop", self.MACHINES, 10, "session:chat-a")
+        self.addCleanup(env.cleanup)
+        self.tool("chat-b", action="use", machine="desk")
+        self.chat = "chat-a"
+        env.execute("true")
+        self.assertEqual(env._target, "laptop")
+        self.tool("chat-a", action="use", machine="desk")
+        env.execute("true")
+        self.assertEqual(env._target, "desk")
+
+    def test_choices_are_bounded(self):
+        for n in range(1200):
+            self.rt.use("laptop", "chat-%d" % n)
+        self.assertLessEqual(len(self.rt.targets), 1000)
+        self.assertEqual(self.rt.chosen_target("chat-1199"), "laptop")
+        self.assertIsNone(self.rt.chosen_target("chat-0"))
 
 
 if __name__ == "__main__":

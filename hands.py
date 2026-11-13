@@ -43,7 +43,7 @@ import sys
 import threading
 import time
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 PROTO = 1
 MAGIC = b"LH1\n"
 MAX_FRAME = 8 * 1024 * 1024

@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 
 from . import lh_core
-from .provider import RUNTIME, HandsProvider, describe_machine
+from .provider import RUNTIME, HandsProvider, describe_machine, scope_key
 
 logger = logging.getLogger(__name__)
 
@@ -58,26 +58,33 @@ def _targets(machines: list) -> list:
     return names + ([lh_core.BRAIN] if RUNTIME.brain_allowed() else [])
 
 
-def _overview(machines: list) -> dict:
-    active = RUNTIME.current_target(machines)
-    return {"active": active, "machines": [
+def _overview(machines: list, scope=None) -> dict:
+    active = RUNTIME.current_target(machines, scope)
+    return {"active": active, "active_applies_to": "this conversation", "machines": [
         {"name": m["name"], "online": bool(m.get("online")), "os": m.get("os"), "user": m.get("user"),
          "workspace": m.get("workspace"), "approval_on_machine": m.get("approve")} for m in machines],
         "brain_target_enabled": RUNTIME.brain_allowed()}
 
 
-def _use(name: str, machines: list) -> tuple[bool, str]:
+def _use(name: str, machines: list, scope=None) -> tuple[bool, str]:
     name = (name or "").strip()
     if name not in _targets(machines):
         return False, f"unknown machine '{name}'. Known: {', '.join(_targets(machines)) or 'none paired'}"
     if name != lh_core.BRAIN and not next(m for m in machines if m["name"] == name).get("online"):
         return False, f"'{name}' is paired but offline: its user has to run `python3 hands.py up` there"
-    RUNTIME.use(name)
-    return True, f"terminal and file tools now run on {name}"
+    RUNTIME.use(name, scope)
+    return True, f"terminal and file tools now run on {name} (for this conversation)"
 
 
 HUB_DOWN = ("hub not running: no machine can be reached. It starts when terminal.backend is 'hands' and a "
             "command runs, or when the user runs `hermes hands up` or `hermes hands pair`.")
+
+
+def _hub_down() -> dict:
+    """What a caller is told when status() found no hub: stopped, or unreachable and why."""
+    if RUNTIME.problem:
+        return {"hub": "unreachable", "note": "hub unreachable: " + RUNTIME.problem + "."}
+    return {"hub": "not running", "note": HUB_DOWN}
 
 
 def _tool_hands(args: dict, **kwargs) -> str:
@@ -85,11 +92,11 @@ def _tool_hands(args: dict, **kwargs) -> str:
     try:
         status = RUNTIME.status()
         machines = list(status.get("machines", [])) if status else []
-        hub = {"hub": "running"} if status else {"hub": "not running", "note": HUB_DOWN}
+        hub = {"hub": "running"} if status else _hub_down()
         if args.get("action") == "use":
             ok, message = _use(str(args.get("machine") or ""), machines)
             if not ok and status is None:
-                message += ". " + HUB_DOWN
+                message += ". " + hub["note"]
             return json.dumps({"ok": ok, "message": message, **hub, **_overview(machines)})
         return json.dumps({"ok": True, **hub, **_overview(machines)})
     except Exception as exc:  # a tool handler must never raise
@@ -179,12 +186,14 @@ def _guess_host() -> str:
         return socket.gethostname()
 
 
-def render_status() -> str:
+def render_status(scope=None) -> str:
     status = RUNTIME.status()
     if status is None:
+        if RUNTIME.problem:
+            return "Local Hands hub cannot be reached: " + RUNTIME.problem + "."
         return "Local Hands hub is not running. Start it with: hermes hands up"
     machines = status["machines"]
-    active = RUNTIME.current_target(machines)
+    active = RUNTIME.current_target(machines, scope)
     lines = [f"Local Hands · brain \"{status['brain']}\" · port {status['port']} · {len(machines)} machine(s)"]
     for m in machines:
         dot = "●" if m.get("online") else "○"
@@ -202,7 +211,7 @@ def render_status() -> str:
 def render_pair(name: str = "", host: str = "") -> str:
     status = RUNTIME.status(autostart=True, explicit=True)
     if status is None:
-        return "Could not start the Local Hands hub (see plugin-data/local-hands/hub.log)."
+        return "Could not start the Local Hands hub: " + (RUNTIME.problem or "see plugin-data/local-hands/hub.log") + "."
     reply = lh_core.rpc(RUNTIME.ctl, {"op": "invite", "name": name})
     if not reply.get("ok"):
         return f"Cannot create an invite: {reply.get('error')}"
@@ -242,10 +251,14 @@ def render_doctor() -> str:
         return ok
 
     status = RUNTIME.status()
-    if not check(status is not None, "hub is running", "hermes hands up   (log: plugin-data/local-hands/hub.log)"):
+    if not check(status is not None, "hub is running",
+                 RUNTIME.problem or "hermes hands up   (log: plugin-data/local-hands/hub.log)"):
         return "\n".join(["Local Hands doctor"] + lines)
     port, bind = int(status["port"]), str(status.get("bind") or "")
     check(True, f"listening on {bind}:{port} (TLS, key pin sha256//{status['pin']})")
+    if bind in ("0.0.0.0", "::"):
+        lines.append("  · every network interface is listening; to restrict it, set "
+                     "plugins.entries.local-hands.settings.bind to one address (VPN, Tailscale) or firewall the port")
     host = _guess_host()
     reachable = False
     try:
@@ -267,15 +280,39 @@ def render_doctor() -> str:
     return "\n".join(["Local Hands doctor"] + lines)
 
 
+def _up_text(status) -> str:
+    if not status:
+        return "The hub did not start: " + (RUNTIME.problem or "see plugin-data/local-hands/hub.log") + "."
+    bind, text = str(status.get("bind") or ""), f"Local Hands hub is running on port {status['port']}"
+    if bind in ("0.0.0.0", "::"):
+        return "\n".join([
+            text + ", on every network interface.",
+            "To listen on one address only (a VPN or Tailscale address, for instance):",
+            "  hermes config set plugins.entries.local-hands.settings.bind <address>",
+            "  hermes hands down && hermes hands up"])
+    return f"{text}, on {bind} only."
+
+
+def _slash_scope(kwargs: dict) -> str:
+    """The conversation a slash command was typed in, named the way tool calls name it.
+    Hermes binds the session for the handler; a chat platform also passes its key. The CLI
+    passes its session id there, but its tools run with no key, hence the exception."""
+    key = scope_key()
+    if key or str(kwargs.get("platform") or "cli") == "cli":
+        return key
+    return str(kwargs.get("session_key") or "")
+
+
 def _slash(raw_args: str = "", **kwargs) -> str:
     parts = (raw_args or "").split()
     sub = parts[0].lower() if parts else "status"
+    scope = _slash_scope(kwargs)
     if sub == "status":
-        return render_status()
+        return render_status(scope)
     if sub == "use" and len(parts) > 1:
         status = RUNTIME.status()
-        message = _use(parts[1], status["machines"] if status else [])[1]
-        return message if status else message + "\n" + render_status()
+        message = _use(parts[1], status["machines"] if status else [], scope)[1]
+        return message if status else message + "\n" + render_status(scope)
     if sub == "pair":
         return render_pair(parts[1] if len(parts) > 1 else "")
     if sub == "log":
@@ -315,7 +352,7 @@ def _cli(args) -> None:
         print(render_status())
     elif cmd == "up":
         status = RUNTIME.status(autostart=True, explicit=True)
-        print(f"Local Hands hub is running on port {status['port']}." if status else "The hub did not start (hub.log).")
+        print(_up_text(status))
     elif cmd == "down":
         try:
             lh_core.rpc(RUNTIME.ctl, {"op": "stop"})

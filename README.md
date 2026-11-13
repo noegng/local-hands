@@ -147,7 +147,7 @@ On the Hermes host (`hermes hands …`, or `/hands …` in a chat):
 | `hermes hands log [-n N]` | Recent commands, where they ran, exit status. |
 | `hermes hands revoke <name>` | Unpair a machine; its daemon stops. |
 | `hermes hands up` / `down` | Start / stop the hub. |
-| `/hands use <machine>` | Choose the active machine from a chat. |
+| `/hands use <machine>` | Choose the active machine for the chat you type it in. |
 
 On your computer:
 
@@ -218,8 +218,12 @@ See [SECURITY.md](SECURITY.md) for the threat model.
 ## Limits you should know
 
 - The daemon runs on macOS, Linux and WSL. Not on native Windows.
-- The active machine belongs to the Hermes process, not to one conversation: if the agent switches
-  machine in one chat, other chats of the same gateway follow (each is told at its next turn).
+- The active machine is chosen per conversation: each gateway chat keeps its own, and a switch in
+  one chat does not move another's commands. The CLI is one conversation. The choice is kept in
+  memory, so a chat returns to the default machine when Hermes restarts.
+- Hermes and its hub talk through a Unix socket. Where the operating system forbids those (some
+  sandboxes and seccomp profiles), no machine can be reached; `hermes hands doctor`, the `hands`
+  tool and the command output all say so by name.
 - Environment variables and skill files are not sent to the machine. A skill that ships scripts must
   find them on the machine itself.
 - Browser and `computer_use` tools do not follow the terminal; they still act where Hermes runs.

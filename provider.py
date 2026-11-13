@@ -38,14 +38,29 @@ def describe_machine(machine: dict) -> str:
     return f"{machine['name']} ({os_name}, user {machine.get('user') or '?'}, workspace {machine.get('workspace') or '~'})"
 
 
+def scope_key() -> str:
+    """The conversation this call is made for: Hermes' session route key (one per gateway
+    chat), read from the turn's own context. It is the key Hermes itself uses to give each
+    chat its terminal environment. ``""`` where Hermes has none (the CLI, cron) or on a
+    Hermes without the helper: those calls share one scope, as the whole process once did."""
+    try:
+        from hermes_cli.plugin_session import session_key
+        return str(session_key() or "")
+    except Exception:
+        return ""
+
+
 class Runtime:
     """Process-wide state shared by the provider, the tool, the hook and the commands."""
 
     def __init__(self) -> None:
         self.settings: dict[str, Any] = {}
         self.data_dir: Optional[Path] = None
-        self.target: Optional[str] = None          # machine chosen with the hands tool or /hands use; None = default
+        # Machine chosen with the hands tool or /hands use, per conversation (scope_key());
+        # a conversation that chose nothing gets the default machine.
+        self.targets: "dict[str, str]" = {}
         self.envs: "list[HandsEnvironment]" = []
+        self.problem = ""                          # why the last status() found no hub, when it is not just "stopped"
         self.lock = threading.RLock()
 
     # -- hub ------------------------------------------------------------------------
@@ -60,8 +75,12 @@ class Runtime:
         ``hands`` backend creating an environment (unless ``autostart_hub`` is off), and
         ``hermes hands up`` / ``pair``, which the user ran on purpose (``explicit``). Reading
         the status (the ``hands`` tool, ``/hands status``, the prompt hook) never starts it."""
+        self.problem = ""
         try:
             return lh_core.rpc(self.ctl, {"op": "status"}, timeout=2.0)
+        except lh_core.HubBlocked as exc:
+            self.problem = str(exc)     # the OS forbids the control socket: starting a hub cannot help
+            return None
         except lh_core.HubUnavailable:
             if not (autostart and (explicit or self.settings.get("autostart_hub", True))):
                 return None
@@ -70,6 +89,7 @@ class Runtime:
                                      port=int(self.settings.get("port") or lh_core.DEFAULT_PORT),
                                      brain_name=str(self.settings.get("brain_name") or ""))
         except lh_core.HubUnavailable as exc:
+            self.problem = str(exc)
             logger.warning("local-hands hub could not be started: %s", exc)
             return None
 
@@ -93,24 +113,28 @@ class Runtime:
         online = [m["name"] for m in machines if m.get("online")]
         return (online or names or [None])[0]
 
-    def chosen_target(self) -> Optional[str]:
-        """The machine that was explicitly chosen, if any."""
+    def chosen_target(self, scope: Optional[str] = None) -> Optional[str]:
+        """The machine this conversation explicitly chose, if any."""
+        scope = scope_key() if scope is None else scope
         with self.lock:
-            return self.target
+            return self.targets.get(scope)
 
-    def current_target(self, machines: Optional[list[dict]] = None) -> Optional[str]:
-        chosen = self.chosen_target()
+    def current_target(self, machines: Optional[list[dict]] = None, scope: Optional[str] = None) -> Optional[str]:
+        chosen = self.chosen_target(scope)
         if chosen:
             return chosen
         return self.default_target(self.machines() if machines is None else machines)
 
-    def use(self, name: str) -> None:
-        """Choose where commands run from now on. The choice belongs to this Hermes process:
-        Hermes keys terminal environments by conversation scope, which a tool call cannot
-        name through public plugin surfaces, so one active machine for everyone is the
-        behaviour that can be stated (and shown to every conversation) truthfully."""
+    def use(self, name: str, scope: Optional[str] = None) -> None:
+        """Choose where this conversation's commands run from now on. Other conversations
+        (other gateway chats) keep their own choice; one chat switching to ``brain`` never
+        moves another chat's commands."""
+        scope = scope_key() if scope is None else scope
         with self.lock:
-            self.target = name
+            self.targets.pop(scope, None)
+            if len(self.targets) >= 1000:               # bounded: forget the oldest choice
+                self.targets.pop(next(iter(self.targets)))
+            self.targets[scope] = name
 
 
 RUNTIME = Runtime()
@@ -417,6 +441,8 @@ class HandsProvider(TerminalEnvironmentProvider):
         if not RUNTIME.has_paired_machine():
             return "needs_setup", "No machine is paired yet. Run: hermes hands pair"
         machines = RUNTIME.machines()
+        if RUNTIME.problem:
+            return "needs_setup", "The hub cannot be reached: " + RUNTIME.problem
         online = [m["name"] for m in machines if m.get("online")]
         if online:
             return "ready", "online: " + ", ".join(online)
@@ -432,7 +458,8 @@ class HandsProvider(TerminalEnvironmentProvider):
         status = RUNTIME.status()
         machines = status.get("machines", []) if status else []
         online = [m["name"] for m in machines if m.get("online")]
-        return [(status is not None, "Local Hands hub", f"(port {status['port']})" if status else "(not running: hermes hands up)"),
+        down = f"(unreachable: {RUNTIME.problem})" if RUNTIME.problem else "(not running: hermes hands up)"
+        return [(status is not None, "Local Hands hub", f"(port {status['port']})" if status else down),
                 (bool(online), "Local Hands machines", f"({', '.join(online)} online)" if online else
                  ("(none connected)" if machines else "(none paired: hermes hands pair)"))]
 
@@ -450,6 +477,10 @@ class HandsProvider(TerminalEnvironmentProvider):
         # Hermes only calls this when terminal.backend is "hands": the one place, with
         # `hermes hands up` and `pair`, where the hub is started.
         machines = RUNTIME.machines(autostart=True)
+        if not machines and RUNTIME.problem:
+            raise EnvironmentConnectionError(
+                "The Local Hands hub cannot be reached: " + RUNTIME.problem + ".",
+                retry_hint="Retrying will not help. Tell the user what blocked it. Nothing ran.")
         target = RUNTIME.current_target(machines)
         by_name = {m["name"]: m for m in machines}
         if target == lh_core.BRAIN and not RUNTIME.brain_allowed():
